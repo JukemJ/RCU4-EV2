@@ -203,7 +203,7 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, signal_handler);
     
     // Restart and configure CAN interfaces
-    printf("\nConfiguring CAN interfaces at %d bps...\n", bitrate);
+    //printf("\nConfiguring CAN interfaces at %d bps...\n", bitrate);
     if (restart_can_interface("canfd1", 250000) < 0 ||
         restart_can_interface("canfd2", 500000) < 0 ||
         restart_can_interface("canfd3", 500000) < 0) {
