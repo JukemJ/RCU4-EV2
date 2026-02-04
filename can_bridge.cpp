@@ -27,6 +27,36 @@ void signal_handler(int signum) {
     running = 0;
 }
 
+// Restart and configure a CAN interface
+int restart_can_interface(const char* interface_name, int bitrate) {
+    char command[256];
+    int ret;
+    
+    printf("Configuring %s...\n", interface_name);
+    
+    // Bring interface down
+    snprintf(command, sizeof(command), "ip link set %s down 2>/dev/null", interface_name);
+    system(command);
+    
+    // Configure bitrate
+    snprintf(command, sizeof(command), "ip link set %s type can bitrate %d", interface_name, bitrate);
+    ret = system(command);
+    if (ret != 0) {
+        fprintf(stderr, "Warning: Failed to configure %s bitrate\n", interface_name);
+    }
+    
+    // Bring interface up
+    snprintf(command, sizeof(command), "ip link set %s up", interface_name);
+    ret = system(command);
+    if (ret != 0) {
+        fprintf(stderr, "Error: Failed to bring up %s\n", interface_name);
+        return -1;
+    }
+    
+    printf("  %s configured at %d bps\n", interface_name, bitrate);
+    return 0;
+}
+
 // Create and bind a CAN socket to the specified interface
 int setup_can_socket(const char* interface_name) {
     int sock;
@@ -90,19 +120,22 @@ int forward_frame(int src_sock, int dst_sock, const char* src_name, const char* 
     printf("\n");
     fflush(stdout);  // Ensure immediate output
     
-    // Write frame to destination
-    nbytes = write(dst_sock, &frame, sizeof(struct can_frame));
-    if (nbytes < 0) {
-        perror("Error writing to CAN");
-        return -1;
+    // Write frame to destination (if destination socket is valid)
+    if (dst_sock >= 0) {
+        nbytes = write(dst_sock, &frame, sizeof(struct can_frame));
+        if (nbytes < 0) {
+            // Don't exit on write error - destination interface may be down
+            fprintf(stderr, "    -> Error forwarding to %s: %s\n", dst_name, strerror(errno));
+            return -1;
+        }
+        
+        if (nbytes < (int)sizeof(struct can_frame)) {
+            fprintf(stderr, "    -> Incomplete frame sent to %s\n", dst_name);
+            return -1;
+        }
+        
+        printf("    -> Forwarded to %s\n", dst_name);
     }
-    
-    if (nbytes < (int)sizeof(struct can_frame)) {
-        fprintf(stderr, "Incomplete CAN frame sent\n");
-        return -1;
-    }
-    
-    printf("    -> Forwarded to %s\n", dst_name);
     
     return 0;
 }
@@ -112,12 +145,27 @@ int main(int argc, char *argv[]) {
     fd_set read_fds;
     int max_fd;
     struct timeval timeout;
+    //int bitrate = 250000;  // Default 250kbps, change as needed
     
     printf("CAN Bridge for RCU4 starting...\n");
     
     // Setup signal handler for clean shutdown
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
+    
+    // Restart and configure CAN interfaces
+    printf("\nConfiguring CAN interfaces at %d bps...\n", bitrate);
+    if (restart_can_interface("canfd1", 250000) < 0 ||
+        restart_can_interface("canfd2", 500000) < 0 ||
+        restart_can_interface("canfd3", 500000) < 0) {
+        fprintf(stderr, "Failed to configure CAN interfaces\n");
+        return 1;
+    }
+    
+    // Small delay to let interfaces stabilize
+    usleep(100000);  // 100ms
+    
+    printf("\nInitializing CAN sockets...\n");
     
     // Initialize CAN sockets
     sock_canfd1 = setup_can_socket("canfd1");
