@@ -19,12 +19,69 @@
 #include <net/if.h>
 #include <linux/can.h>
 #include <linux/can/raw.h>
+#include <stdint.h>
+
+// CAN ID for keypad messages
+#define CAN_ID_KEYPAD 0x18FF0280
+
+// CAN ID for J1939 TSC1 (Torque/Speed Control)
+#define CAN_ID_TSC1 0x0C000003
+
+// Button state tracking (for 8 buttons)
+static bool buttonStates[8] = {false};
+static bool buttonChanged[8] = {false};
 
 // Global flag for clean shutdown
 volatile sig_atomic_t running = 1;
 
 void signal_handler(int signum) {
     running = 0;
+}
+
+// Decode keypad button data (J1939 format)
+void decodeKeypadButtons(unsigned char* data) {
+    // Combine first two bytes to get 16 bits for J1939 keypad format
+    uint16_t buttonData = (data[1] << 8) | data[0];
+    
+    printf("  Keypad Buttons: ");
+    
+    // Check each button (2 bits each, starting from LSB)
+    for (int i = 0; i < 8; i++) {
+        uint8_t buttonBits = (buttonData >> (i * 2)) & 0x03;
+        bool previousState = buttonStates[i];
+        buttonStates[i] = (buttonBits == 0x01);
+        buttonChanged[i] = (buttonStates[i] != previousState);
+        
+        // Print button state
+        if (buttonStates[i]) {
+            printf("[BTN%d:PRESSED]", i);
+            if (buttonChanged[i]) {
+                printf("*");  // Asterisk indicates state change
+            }
+            printf(" ");
+        }
+    }
+    printf("\n");
+}
+
+// Decode J1939 TSC1 message (Torque/Speed Control)
+void decodeTSC1(unsigned char* data) {
+    // Byte 0: Override control modes
+    uint8_t overrideCtrl = data[0];
+    
+    // Bytes 1-2: Requested speed/speed limit (little-endian, 0.125 rpm/bit)
+    uint16_t rawSpeed = (data[2] << 8) | data[1];
+    float requestedSpeed = rawSpeed * 0.125;  // RPM
+    
+    // Byte 3: Requested torque/torque limit (1% per bit, offset -125%)
+    uint8_t rawTorque = data[3];
+    int16_t requestedTorque = rawTorque - 125;  // Percent
+    
+    // Byte 4: Override control mode priority
+    uint8_t priority = data[4] & 0x03;
+    
+    printf("  TSC1: Speed=%.1f RPM, Torque=%d%%, Priority=%d, CtrlMode=0x%02X\n", 
+           requestedSpeed, requestedTorque, priority, overrideCtrl);
 }
 
 // Restart and configure a CAN interface
@@ -93,8 +150,8 @@ int setup_can_socket(const char* interface_name) {
     return sock;
 }
 
-// Forward a CAN frame from source to destination socket
-int forward_frame(int src_sock, int dst_sock, const char* src_name, const char* dst_name) {
+// Read and print CAN frame from socket
+int read_and_print_frame(int src_sock, const char* src_name) {
     struct can_frame frame;
     int nbytes;
     
@@ -113,29 +170,21 @@ int forward_frame(int src_sock, int dst_sock, const char* src_name, const char* 
     }
     
     // Print received CAN message
-    printf("[RX %s] ID=0x%03X DLC=%d Data: ", src_name, frame.can_id & CAN_EFF_MASK, frame.can_dlc);
+    printf("[RX %s] ID=0x%08X DLC=%d Data: ", src_name, frame.can_id & CAN_EFF_MASK, frame.can_dlc);
     for (int i = 0; i < frame.can_dlc; i++) {
         printf("%02X ", frame.data[i]);
     }
     printf("\n");
-    fflush(stdout);  // Ensure immediate output
     
-    // Write frame to destination (if destination socket is valid)
-    if (dst_sock >= 0) {
-        nbytes = write(dst_sock, &frame, sizeof(struct can_frame));
-        if (nbytes < 0) {
-            // Don't exit on write error - destination interface may be down
-            fprintf(stderr, "    -> Error forwarding to %s: %s\n", dst_name, strerror(errno));
-            return -1;
-        }
-        
-        if (nbytes < (int)sizeof(struct can_frame)) {
-            fprintf(stderr, "    -> Incomplete frame sent to %s\n", dst_name);
-            return -1;
-        }
-        
-        printf("    -> Forwarded to %s\n", dst_name);
+    // Decode specific messages
+    if ((frame.can_id & CAN_EFF_MASK) == CAN_ID_KEYPAD && frame.can_dlc >= 2) {
+        decodeKeypadButtons(frame.data);
     }
+    else if ((frame.can_id & CAN_EFF_MASK) == CAN_ID_TSC1 && frame.can_dlc >= 4) {
+        decodeTSC1(frame.data);
+    }
+    
+    fflush(stdout);  // Ensure immediate output
     
     return 0;
 }
@@ -178,7 +227,7 @@ int main(int argc, char *argv[]) {
     }
     
     printf("All CAN interfaces initialized successfully\n");
-    printf("Starting message routing...\n");
+    printf("Monitoring CAN messages (no forwarding)...\n");
     
     // Main loop - similar to Arduino loop()
     while (running) {
@@ -213,23 +262,18 @@ int main(int argc, char *argv[]) {
             continue;
         }
         
-        // Check which socket has data and forward accordingly
-        // TODO: Add your specific routing logic here
-        // For now, this is a simple example routing pattern
+        // Check which socket has data and print received messages
         
         if (FD_ISSET(sock_canfd1, &read_fds)) {
-            // Example: Forward from canfd1 to canfd2
-            forward_frame(sock_canfd1, sock_canfd2, "canfd1", "canfd2");
+            read_and_print_frame(sock_canfd1, "canfd1");
         }
         
         if (FD_ISSET(sock_canfd2, &read_fds)) {
-            // Example: Forward from canfd2 to canfd3
-            forward_frame(sock_canfd2, sock_canfd3, "canfd2", "canfd3");
+            read_and_print_frame(sock_canfd2, "canfd2");
         }
         
         if (FD_ISSET(sock_canfd3, &read_fds)) {
-            // Example: Forward from canfd3 to canfd1
-            forward_frame(sock_canfd3, sock_canfd1, "canfd3", "canfd1");
+            read_and_print_frame(sock_canfd3, "canfd3");
         }
     }
     
