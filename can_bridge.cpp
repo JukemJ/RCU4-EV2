@@ -82,6 +82,14 @@ int forward_frame(int src_sock, int dst_sock, const char* src_name, const char* 
         return -1;
     }
     
+    // Print received CAN message
+    printf("[RX %s] ID=0x%03X DLC=%d Data: ", src_name, frame.can_id & CAN_EFF_MASK, frame.can_dlc);
+    for (int i = 0; i < frame.can_dlc; i++) {
+        printf("%02X ", frame.data[i]);
+    }
+    printf("\n");
+    fflush(stdout);  // Ensure immediate output
+    
     // Write frame to destination
     nbytes = write(dst_sock, &frame, sizeof(struct can_frame));
     if (nbytes < 0) {
@@ -94,12 +102,7 @@ int forward_frame(int src_sock, int dst_sock, const char* src_name, const char* 
         return -1;
     }
     
-    // Print debug info
-    printf("%s -> %s: ID=0x%03X DLC=%d Data=", src_name, dst_name, frame.can_id, frame.can_dlc);
-    for (int i = 0; i < frame.can_dlc; i++) {
-        printf("%02X ", frame.data[i]);
-    }
-    printf("\n");
+    printf("    -> Forwarded to %s\n", dst_name);
     
     return 0;
 }
